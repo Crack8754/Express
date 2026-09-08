@@ -60,19 +60,6 @@ npm run typecheck
 
 npm test
 
-## Структура проєкту
-
-campushub-api/
-├── src/
-│   ├── app.ts
-│   ├── app.test.ts
-│   └── server.ts
-├── .env.example
-├── .gitignore
-├── package.json
-├── README.md
-└── tsconfig.json
-
 ## Node.js
 
 Для цього проєкту потрібен Node.js версії 20 або новішої.

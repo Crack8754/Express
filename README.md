@@ -15,8 +15,8 @@ npm install
 
 Створіть файл `.env`:
 
-PORT=3000
-NODE_ENV=development
+* PORT=3000
+* NODE_ENV=development
 
 ## Розробка
 

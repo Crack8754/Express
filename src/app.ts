@@ -1,9 +1,56 @@
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { readEvents, writeEvents } from "./fileEventStore.js";
+import eventsRouter from "./routes/events.router.js";
+
+declare global {
+  namespace Express {
+    interface Request {
+      requestId: string;
+    }
+  }
+}
 
 const app = express();
 type EventInput = { title?: unknown; date?: unknown };
+
+function requestId(req: express.Request, res: express.Response, next: express.NextFunction) {
+  req.requestId = randomUUID();
+  res.setHeader("X-Request-Id", req.requestId);
+  console.log("1. requestId");
+  next();
+}
+
+function logger(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const startedAt = Date.now();
+  console.log("2. logger");
+  res.on("finish", () => {
+    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - startedAt}ms requestId=${req.requestId}`);
+  });
+  next();
+}
+
+function notFound(req: express.Request, res: express.Response) {
+  console.log("4. notFound");
+  res.status(404).json({
+    statusCode: 404,
+    message: "Route not found",
+    requestId: req.requestId
+  });
+}
+
+function errorHandler(error: Error, req: express.Request, res: express.Response, _next: express.NextFunction) {
+  console.log("5. errorHandler");
+  console.error(error);
+  res.status(500).json({
+    statusCode: 500,
+    message: "Internal server error",
+    requestId: req.requestId
+  });
+}
+
+app.use(requestId);
+app.use(logger);
 
 app.use(express.json());
 
@@ -22,6 +69,8 @@ function sendValidationError(res: express.Response, message: string) {
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: "campushub-api", timestamp: new Date().toISOString() });
 });
+
+app.use("/api/events", eventsRouter);
 
 app.get("/api/events-from-file", async (req, res) => {
   try {
@@ -113,8 +162,7 @@ app.delete("/api/events-from-file/:id", async (req, res) => {
   }
 });
 
-app.use((_req, res) => {
-  res.status(404).json({ message: "Маршрут не знайдено" });
-});
+app.use(notFound);
+app.use(errorHandler);
 
 export default app;

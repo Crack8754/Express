@@ -2,6 +2,10 @@ import express from "express";
 import { randomUUID } from "node:crypto";
 import { readEvents, writeEvents } from "./fileEventStore.js";
 import eventsRouter from "./routes/events.router.js";
+import { requestId } from "./middleware/request-id.js";
+import { logger } from "./middleware/logger.js";
+import { notFound } from "./middleware/not-found.js";
+import { errorHandler } from "./middleware/error-handler.js";
 
 declare global {
   namespace Express {
@@ -13,41 +17,6 @@ declare global {
 
 const app = express();
 type EventInput = { title?: unknown; date?: unknown };
-
-function requestId(req: express.Request, res: express.Response, next: express.NextFunction) {
-  req.requestId = randomUUID();
-  res.setHeader("X-Request-Id", req.requestId);
-  console.log("1. requestId");
-  next();
-}
-
-function logger(req: express.Request, res: express.Response, next: express.NextFunction) {
-  const startedAt = Date.now();
-  console.log("2. logger");
-  res.on("finish", () => {
-    console.log(`${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - startedAt}ms requestId=${req.requestId}`);
-  });
-  next();
-}
-
-function notFound(req: express.Request, res: express.Response) {
-  console.log("4. notFound");
-  res.status(404).json({
-    statusCode: 404,
-    message: "Route not found",
-    requestId: req.requestId
-  });
-}
-
-function errorHandler(error: Error, req: express.Request, res: express.Response, _next: express.NextFunction) {
-  console.log("5. errorHandler");
-  console.error(error);
-  res.status(500).json({
-    statusCode: 500,
-    message: "Internal server error",
-    requestId: req.requestId
-  });
-}
 
 app.use(requestId);
 app.use(logger);
@@ -62,8 +31,8 @@ function hasValidEventFields(body: EventInput): body is { title: string; date: s
   return isNonEmptyString(body.title) && isNonEmptyString(body.date);
 }
 
-function sendValidationError(res: express.Response, message: string) {
-  return res.status(400).json({ message });
+function sendValidationError(next: express.NextFunction, message: string) {
+  return next(Object.assign(new Error(message), { statusCode: 400, code: "VALIDATION_ERROR" }));
 }
 
 app.get("/health", (_req, res) => {
@@ -72,7 +41,7 @@ app.get("/health", (_req, res) => {
 
 app.use("/api/events", eventsRouter);
 
-app.get("/api/events-from-file", async (req, res) => {
+app.get("/api/events-from-file", async (req, res, next) => {
   try {
     const events = await readEvents();
     const { date, title } = req.query;
@@ -82,14 +51,13 @@ app.get("/api/events-from-file", async (req, res) => {
     );
     res.status(200).json(filteredEvents);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Не вдалося прочитати або зберегти події" });
+    return next(error);
   }
 });
 
-app.post("/api/events-from-file", async (req, res) => {
+app.post("/api/events-from-file", async (req, res, next) => {
   const body: EventInput = req.body ?? {};
-  if (!hasValidEventFields(body)) return sendValidationError(res, "Поля title і date є обов'язковими непорожніми рядками");
+  if (!hasValidEventFields(body)) return sendValidationError(next, "Поля title і date є обов'язковими непорожніми рядками");
 
   try {
     const events = await readEvents();
@@ -98,41 +66,39 @@ app.post("/api/events-from-file", async (req, res) => {
     await writeEvents(events);
     return res.status(201).json(newEvent);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Не вдалося прочитати або зберегти події" });
+    return next(error);
   }
 });
 
-app.put("/api/events-from-file/:id", async (req, res) => {
+app.put("/api/events-from-file/:id", async (req, res, next) => {
   const body: EventInput = req.body ?? {};
-  if (!hasValidEventFields(body)) return sendValidationError(res, "Для PUT потрібні поля title і date як непорожні рядки");
+  if (!hasValidEventFields(body)) return sendValidationError(next, "Для PUT потрібні поля title і date як непорожні рядки");
 
   try {
     const events = await readEvents();
     const index = events.findIndex((event: { id: string }) => event.id === req.params.id);
-    if (index === -1) return res.status(404).json({ message: "Подію не знайдено" });
+    if (index === -1) return next(Object.assign(new Error("Подію не знайдено"), { statusCode: 404, code: "EVENT_NOT_FOUND" }));
     const updatedEvent = { id: req.params.id, title: body.title.trim(), date: body.date.trim() };
     events[index] = updatedEvent;
     await writeEvents(events);
     return res.status(200).json(updatedEvent);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Не вдалося прочитати або зберегти події" });
+    return next(error);
   }
 });
 
-app.patch("/api/events-from-file/:id", async (req, res) => {
+app.patch("/api/events-from-file/:id", async (req, res, next) => {
   const body: EventInput = req.body ?? {};
   const updatesTitle = body.title !== undefined;
   const updatesDate = body.date !== undefined;
   if ((!updatesTitle && !updatesDate) || (updatesTitle && !isNonEmptyString(body.title)) || (updatesDate && !isNonEmptyString(body.date))) {
-    return sendValidationError(res, "PATCH має містити title або date як непорожній рядок");
+    return sendValidationError(next, "PATCH має містити title або date як непорожній рядок");
   }
 
   try {
     const events = await readEvents();
     const index = events.findIndex((event: { id: string }) => event.id === req.params.id);
-    if (index === -1) return res.status(404).json({ message: "Подію не знайдено" });
+    if (index === -1) return next(Object.assign(new Error("Подію не знайдено"), { statusCode: 404, code: "EVENT_NOT_FOUND" }));
     const event = events[index];
     const updatedEvent = {
       ...event,
@@ -143,22 +109,20 @@ app.patch("/api/events-from-file/:id", async (req, res) => {
     await writeEvents(events);
     return res.status(200).json(updatedEvent);
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Не вдалося прочитати або зберегти події" });
+    return next(error);
   }
 });
 
-app.delete("/api/events-from-file/:id", async (req, res) => {
+app.delete("/api/events-from-file/:id", async (req, res, next) => {
   try {
     const events = await readEvents();
     const index = events.findIndex((event: { id: string }) => event.id === req.params.id);
-    if (index === -1) return res.status(404).json({ message: "Подію не знайдено" });
+    if (index === -1) return next(Object.assign(new Error("Подію не знайдено"), { statusCode: 404, code: "EVENT_NOT_FOUND" }));
     events.splice(index, 1);
     await writeEvents(events);
     return res.status(204).send();
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ message: "Не вдалося прочитати або зберегти події" });
+    return next(error);
   }
 });
 

@@ -20,6 +20,8 @@ npm install
 ```env
 PORT=3000
 NODE_ENV=development
+LOG_LEVEL=debug
+MAX_EVENTS=100
 ```
 
 ## Розробка
@@ -62,7 +64,7 @@ app.use('/api/events', eventsRouter);
 4. `notFound` підключено після всіх маршрутів, щоб спрацьовувати лише тоді, коли жоден маршрут не відповів. Він повертає `404` у єдиному форматі.
 5. Глобальний `errorHandler` має бути останнім: Express передає йому помилки з усіх попередніх middleware та маршрутів. Для перевірки використайте `GET /api/events/error/test`.
 
-У консолі сервер тимчасово показує порядок: `1. requestId`, `2. logger`, `3. router`, а для невідомого маршруту — `4. notFound`; для тестової помилки — `5. errorHandler`.
+Після завершення запиту logger показує метод, URL, HTTP-статус, тривалість і requestId. Тимчасові повідомлення порядку з ПР4 прибрано.
 
 ### Команди для перевірки
 
@@ -169,7 +171,13 @@ ID створюється сервером автоматично за допо�
 
 ```json
 {
-  "message": "Не вдалося прочитати або зберегти події"
+  "type": "https://example.com/problems/internal-server-error",
+  "title": "Internal server error",
+  "status": 500,
+  "detail": "An unexpected server error occurred",
+  "instance": "/api/events-from-file",
+  "code": "INTERNAL_SERVER_ERROR",
+  "requestId": "ідентифікатор-запиту"
 }
 ```
 
@@ -195,7 +203,13 @@ Status: 500
 
 ```json
 {
-  "message": "Не вдалося прочитати або зберегти події"
+  "type": "https://example.com/problems/internal-server-error",
+  "title": "Internal server error",
+  "status": 500,
+  "detail": "An unexpected server error occurred",
+  "instance": "/api/events-from-file",
+  "code": "INTERNAL_SERVER_ERROR",
+  "requestId": "ідентифікатор-запиту"
 }
 ```
 
@@ -219,7 +233,13 @@ Status: 500
 
 ```json
 {
-  "message": "Не вдалося прочитати або зберегти події"
+  "type": "https://example.com/problems/internal-server-error",
+  "title": "Internal server error",
+  "status": 500,
+  "detail": "An unexpected server error occurred",
+  "instance": "/api/events-from-file",
+  "code": "INTERNAL_SERVER_ERROR",
+  "requestId": "ідентифікатор-запиту"
 }
 ```
 
@@ -251,4 +271,68 @@ npm test
 ## Node.js
 
 Для цього проєкту потрібен Node.js версії 20 або новішої.
+
+## ПР5: конфігурація, валідація та Problem Details
+
+### Запуск та відтворення
+
+Залежності `dotenv` і `zod` зазначено в package.json. Після отримання проєкту:
+
+```powershell
+npm ci
+Copy-Item .env.example .env
+npm run dev
+```
+
+Копіювання потрібне лише якщо локального `.env` ще немає. Він ігнорується Git; `.env.example` містить безпечний приклад без секретів.
+`src/config/env.js` перевіряє конфігурацію перед запуском: PORT — ціле число 1–65535, NODE_ENV — development/test/production, LOG_LEVEL — debug/info/warn/error, MAX_EVENTS — додатне ціле число. PORT і MAX_EVENTS стають числами. Якщо значення не задані, діють стандартні значення зі схеми. Якщо задані неправильно — процес завершується з кодом 1 до відкриття порту.
+
+Підтримано ESM (`type: module`) для JavaScript-модулів та `allowJs` для їх включення до TypeScript-збірки. Команди `npm run build` та `npm start` запускають той самий API зі збірки.
+
+### Структура
+
+- `src/config/env.js` — перевірені змінні середовища.
+- `src/schemas/event.schemas.js` — Zod-схеми створення, оновлення, id та query.
+- `src/middleware/validate.js` — універсальна перевірка body/params/query.
+- `src/middleware/request-id.js`, `logger.js`, `not-found.js`, `error-handler.js` — middleware.
+- `src/routes/events.router.js` — обробники та бізнес-перевірки.
+- `docs/pr5-results.md` — фактичні результати 17 curl-запитів та чотирьох перевірок конфігурації.
+
+### Валідація
+
+Для POST обов'язкові title (3–100 символів після trim) та date (формат YYYY-MM-DD). description необов'язкове, до 500 символів після trim; isOnline — boolean, стандартно false. Схеми strict забороняють невідомі поля. Перевіряється формат дати, відповідно до завдання.
+
+PATCH дозволяє будь-яку непорожню підмножину цих полів. Стандартне isOnline=false додається лише під час створення, тому оновлення назви не скидає вже встановлений isOnline=true.
+ID перевіряється як додатне ціле число та перетворюється з рядка до виконання логіки маршруту.
+
+GET /api/events дозволяє query `title` (пошук за фрагментом без урахування регістру) і `date` (точний збіг). Інші query-поля, неправильна дата й порожня назва відхиляються з 400.
+Через getter req.query в Express 5 validate записує результат за допомогою Object.defineProperty.
+
+Подія, якої немає, повертає 404/EVENT_NOT_FOUND. Однакові title (без урахування регістру) та date повертають 409/EVENT_ALREADY_EXISTS; це перевіряється і для PATCH. Перевищення MAX_EVENTS повертає 409/EVENT_LIMIT_REACHED. Видалені ID не використовуються повторно. Події зберігаються в пам'яті та скидаються після перезапуску.
+
+### Обробка помилок
+
+Порядок: requestId → logger → express.json → маршрути → notFound → errorHandler.
+requestId і logger стоять перед JSON-парсером, щоб пошкоджений JSON також мав X-Request-Id та лог. Це уточнення порядку з методички потрібне для вимоги «кожна помилка містить requestId».
+
+Усі помилки API, включно з файловими маршрутами попередніх робіт, мають Content-Type: application/problem+json та поля type, title, status, detail, instance, code, requestId. errors додається лише для помилок полів. Невідомий маршрут передається через next(error) з кодом ROUTE_NOT_FOUND; пошкоджений JSON має код INVALID_JSON.
+
+Для 500 клієнт отримує лише загальне повідомлення. Stack trace та внутрішнє повідомлення доступні лише в серверному логу з requestId. LOG_LEVEL задає мінімальний рівень журналу запитів; серверні помилки завжди фіксуються.
+
+### Перевірки та матеріали для здачі
+
+```powershell
+npm run typecheck
+npm run build
+npm test -- --run
+node scripts/verify-pr5.mjs
+```
+
+Усі команди зі звіту використовують порт 3000. Для ручної перевірки спочатку запустіть `npm run dev` в окремому терміналі. Команди у звіті сумісні з Windows PowerShell 5.1: JSON передається в curl.exe через stdin.
+
+Перед запуском `node scripts/verify-pr5.mjs` зупиніть свій сервер (Ctrl+C), щоб звільнити порт 3000. Скрипт сам запускає тестовий сервер на 3000, перевіряє HTTP-відповіді через curl.exe, зупиняє його й повторно запускає на тому самому порту з MAX_EVENTS=1 для перевірки ліміту. Після перевірок тестові процеси завершуються. `.env` скрипт не змінює; для подальшої ручної роботи знову виконайте `npm run dev`.
+
+[Звіт із командами, статусами, X-Request-Id та JSON](docs/pr5-results.md) містить успішну відповідь 201 і приклади всіх помилок 400/404/409/500, а також перевірку ліміту й неправильних змінних середовища. Повторний запуск генерує нові requestId.
+
+Старі Postman-перевірки негативних відповідей з попередньої роботи слід оновити: тепер Content-Type помилок — application/problem+json, а текст помилки міститься в detail замість message.
 
